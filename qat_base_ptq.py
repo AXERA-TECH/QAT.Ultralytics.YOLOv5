@@ -293,6 +293,7 @@ def train(hyp, opt, device, callbacks):
     compute_loss = ComputeLoss(model)  # init loss class
 
     inputs = torch.rand(1, 3, 640, 640).to(device)
+    export_inputs = torch.rand(1, 3, 704, 1280).to(device)
     onnx_program = torch.onnx.export(model, (inputs,), dynamo=True)
     onnx_program.optimize()
     onnx_program.save("./yolov5s_dynamo_float.onnx")
@@ -641,6 +642,9 @@ def train(hyp, opt, device, callbacks):
             # Forward
             with torch.cuda.amp.autocast(amp):
                 pred = model(imgs)  # forward
+                for i, x in enumerate(pred):
+                    bs, _, ny, nx = x.shape  # x(bs,255,20,20) to x(bs,3,20,20,85)
+                    pred[i] = x.view(bs, qat_model.detm.na, qat_model.detm.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
                 loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
                 if RANK != -1:
                     loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
@@ -733,7 +737,7 @@ def train(hyp, opt, device, callbacks):
                     prepared_model_copy = deepcopy(de_parallel(model))
                     prepared_model_copy.eval()
                     quantized_model = convert_pt2e(prepared_model_copy)
-                    onnx_program = torch.onnx.export(quantized_model, (inputs,), dynamo=True)
+                    onnx_program = torch.onnx.export(quantized_model, (export_inputs,), dynamo=True)
                     onnx_program.optimize()
                     onnx_program.save(best_onnx)
                     del prepared_model_copy
@@ -744,7 +748,7 @@ def train(hyp, opt, device, callbacks):
                     prepared_model_copy = deepcopy(de_parallel(model))
                     prepared_model_copy.eval()
                     quantized_model = convert_pt2e(prepared_model_copy)
-                    onnx_program = torch.onnx.export(quantized_model, (inputs,), dynamo=True)
+                    onnx_program = torch.onnx.export(quantized_model, (export_inputs,), dynamo=True)
                     onnx_program.optimize()
                     onnx_program.save(w / f"epoch{epoch}.onnx")
                     del prepared_model_copy
