@@ -486,7 +486,9 @@ def decode_bbox_hardcode(x,  device):
     for i, x_i_raw in enumerate(x):
         # Convert to torch tensor if it's a numpy array (from ONNX Runtime)
         x_i = torch.from_numpy(x_i_raw).to(device) if isinstance(x_i_raw, np.ndarray) else x_i_raw
-        
+        bs, _, ny, nx = x_i.shape  # x(bs,255,20,20) to x(bs,3,20,20,85)
+        x_i = x_i.view(bs, na, nc+5, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
+
         # (bs, na, ny, nx, no)
         bs , _, ny, nx , _ = x_i.shape
         
@@ -495,7 +497,7 @@ def decode_bbox_hardcode(x,  device):
             grid[i], anchor_grid[i] = _make_grid(nx, ny, i, anchors, stride, na)
 
         # Apply sigmoid and coordinate transformations
-        xy, wh, conf = x_i.sigmoid().split((2, 2, 81), 4)
+        xy, wh, conf = x_i.split((2, 2, 81), 4)
         xy = (xy * 2 + grid[i]) * stride[i]  # xy
         wh = (wh * 2) ** 2 * anchor_grid[i]  # wh
 

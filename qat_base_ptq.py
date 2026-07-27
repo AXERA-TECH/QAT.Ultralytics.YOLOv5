@@ -293,7 +293,7 @@ def train(hyp, opt, device, callbacks):
     compute_loss = ComputeLoss(model)  # init loss class
 
     inputs = torch.rand(1, 3, 640, 640).to(device)
-    export_inputs = torch.rand(1, 3, 704, 1280).to(device)
+    export_inputs = torch.rand(1, 3, 640, 640).to(device)
     onnx_program = torch.onnx.export(model, (inputs,), dynamo=True)
     onnx_program.optimize()
     onnx_program.save("./yolov5s_dynamo_float.onnx")
