@@ -37,7 +37,7 @@ data/images/*
 !yolov5s_8w8f_qdq.onnx
 !yolov5s.pt
 results*.csv
-
+cache/
 # Datasets -------------------------------------------------------------------------------------------------------------
 coco/
 coco128/

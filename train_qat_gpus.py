@@ -120,8 +120,7 @@ RANK = int(os.getenv("RANK", -1))
 WORLD_SIZE = int(os.getenv("WORLD_SIZE", 1))
 GIT_INFO = check_git_info()
 
-import onnx
-from onnxslim import slim
+from onnx_canonicalize import export_onnx_program, optimize_onnx_program, slim_onnx_program
 from torch.ao.quantization.quantizer.xnnpack_quantizer import XNNPACKQuantizer, get_symmetric_quantization_config
 from torch.ao.quantization.quantize_pt2e import prepare_qat_pt2e, convert_pt2e
 from utils.ax_quantizer_lsq import AXQuantizer, load_config
@@ -651,8 +650,8 @@ def train(hyp, opt, device, callbacks):
                     prepared_model_copy = deepcopy(de_parallel(model))
                     prepared_model_copy.eval()
                     quantized_model = convert_pt2e(prepared_model_copy)
-                    onnx_program = torch.onnx.export(quantized_model, (inputs,), dynamo=True)
-                    onnx_program.optimize()
+                    onnx_program = export_onnx_program(quantized_model, (inputs,), dynamo=True)
+                    optimize_onnx_program(onnx_program)
                     onnx_program.save(best_onnx)
                     del prepared_model_copy
                     del onnx_program
@@ -662,8 +661,8 @@ def train(hyp, opt, device, callbacks):
                     prepared_model_copy = deepcopy(de_parallel(model))
                     prepared_model_copy.eval()
                     quantized_model = convert_pt2e(prepared_model_copy)
-                    onnx_program = torch.onnx.export(quantized_model, (inputs,), dynamo=True)
-                    onnx_program.optimize()
+                    onnx_program = export_onnx_program(quantized_model, (inputs,), dynamo=True)
+                    optimize_onnx_program(onnx_program)
                     onnx_program.save(w / f"epoch{epoch}.onnx")
                     del prepared_model_copy
                     del onnx_program
@@ -686,13 +685,11 @@ def train(hyp, opt, device, callbacks):
 
     prepared_model_copy = deepcopy(de_parallel(model))
     quantized_model = convert_pt2e(prepared_model_copy)
-    onnx_program = torch.onnx.export(quantized_model, (inputs,), dynamo=True, opset_version=21)
-    onnx_program.optimize()
+    onnx_program = export_onnx_program(quantized_model, (inputs,), dynamo=True, opset_version=21)
+    optimize_onnx_program(onnx_program)
     onnx_program.save("./yolov5s_qat.onnx")
-
-    model = onnx.load("./yolov5s_qat.onnx")
-    model = slim(model)
-    onnx.save(model, "./yolov5s_qat_slim.onnx")
+    slim_onnx_program(onnx_program)
+    onnx_program.save("./yolov5s_qat_slim.onnx")
 
     torch.cuda.empty_cache()
     return results
