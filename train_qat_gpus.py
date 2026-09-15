@@ -599,7 +599,8 @@ def train(hyp, opt, device, callbacks):
             # model.apply(enable_observer)
             # ema.update_attr(model, include=["yaml", "nc", "hyp", "names", "stride", "class_weights"])
             final_epoch = (epoch + 1 == epochs) or stopper.possible_stop
-            if not noval or final_epoch:  # Calculate mAP
+            run_val = (not noval and (epoch + 1) % opt.val_period == 0) or final_epoch
+            if run_val:  # Calculate mAP
                 val_model = de_parallel(model) if RANK != -1 else model
                 qat_model.model = val_model
                 results, maps, _ = validate.run(
@@ -729,6 +730,7 @@ def parse_opt(known=False):
     parser.add_argument("--resume", nargs="?", const=True, default=False, help="resume most recent training")
     parser.add_argument("--nosave", action="store_true", help="only save final checkpoint")
     parser.add_argument("--noval", action="store_true", help="only validate final epoch")
+    parser.add_argument("--val-period", type=int, default=1, help="validate every N epochs (final epoch always validated)")
     parser.add_argument("--noautoanchor", action="store_true", help="disable AutoAnchor")
     parser.add_argument("--noplots", action="store_true", help="save no plot files")
     parser.add_argument("--evolve", type=int, nargs="?", const=300, help="evolve hyperparameters for x generations")

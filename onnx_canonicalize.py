@@ -21,7 +21,7 @@ Usage
     from onnx_canonicalize import export_onnx_program, optimize_onnx_program, slim_onnx_program
 
     onnx_program = export_onnx_program(model, (x,), dynamo=True)  # no constant sharing
-    optimize_onnx_program(onnx_program)                           # no initializer dedup
+    optimize_onnx_program(onnx_program)                           # no initializer dedup, paired Q/DQ edges
     onnx_program.save(path)
     slim_onnx_program(onnx_program)                               # single slim round, no weight tying
     onnx_program.save(path)
@@ -263,6 +263,90 @@ def _slim_once(
     return slimmed
 
 
+def pair_qdq_edges(model_proto: onnx.ModelProto) -> onnx.ModelProto:
+    """Merge duplicate DequantizeLinear consumers of a shared QuantizeLinear.
+
+    Spec rule 3.4: a ``QuantizeLinear`` output must have exactly one consumer,
+    the paired ``DequantizeLinear``; that DQ may then feed many branches.
+    pt2e emits one DQ per consumer edge for a shared observed tensor, so a Q at
+    a branch point feeds several identical DQs.  For each such Q, keep the
+    first DQ (its scale/zero_point must match by name or by value), rewire the
+    consumers of the other DQs to it, and drop the redundant DQs.  Q/DQ pairs
+    around ops (e.g. MaxPool/Resize) are untouched: every op still sits behind
+    its own DQ and in front of its own Q.
+
+    Non-standard shapes (a Q consumed by a non-DQ node, a DQ feeding a graph
+    output, mismatched quant params) are left as-is for the spec verifier to
+    flag.  Numerical semantics are unchanged: a DQ is deterministic given its
+    quant params, so merging identical duplicates is an identity transform.
+    """
+    from onnx import numpy_helper
+
+    graph = model_proto.graph
+    consumers: dict[str, list[onnx.NodeProto]] = defaultdict(list)
+    for node in graph.node:
+        for inp in node.input:
+            consumers[inp].append(node)
+    initializers = {i.name: i for i in graph.initializer}
+    graph_outputs = {o.name for o in graph.output}
+
+    def same_param(dq_a: onnx.NodeProto, dq_b: onnx.NodeProto, idx: int) -> bool:
+        name_a, name_b = dq_a.input[idx], dq_b.input[idx]
+        if name_a == name_b:
+            return True
+        init_a, init_b = initializers.get(name_a), initializers.get(name_b)
+        if init_a is None or init_b is None:
+            return False
+        arr_a, arr_b = numpy_helper.to_array(init_a), numpy_helper.to_array(init_b)
+        return (
+            init_a.data_type == init_b.data_type
+            and arr_a.shape == arr_b.shape
+            and arr_a.tobytes() == arr_b.tobytes()
+        )
+
+    rewire: dict[str, str] = {}
+    dropped: list[onnx.NodeProto] = []
+    for node in graph.node:
+        if node.op_type != "QuantizeLinear" or not node.output:
+            continue
+        edges = consumers.get(node.output[0], [])
+        dqs = [c for c in edges if c.op_type == "DequantizeLinear"]
+        if len(dqs) <= 1 or len(dqs) != len(edges):
+            continue
+        keep = dqs[0]
+        for dq in dqs[1:]:
+            if dq.output[0] in graph_outputs:
+                continue
+            if not (same_param(keep, dq, 1) and same_param(keep, dq, 2)):
+                continue
+            rewire[dq.output[0]] = keep.output[0]
+            dropped.append(dq)
+    if not dropped:
+        return model_proto
+
+    for node in graph.node:
+        for i, inp in enumerate(node.input):
+            if inp in rewire:
+                node.input[i] = rewire[inp]
+
+    dropped_ids = {id(n) for n in dropped}
+    kept_nodes = [n for n in graph.node if id(n) not in dropped_ids]
+    del graph.node[:]
+    graph.node.extend(kept_nodes)
+
+    still_used = {inp for n in graph.node for inp in n.input} | graph_outputs
+    kept_inits = [i for i in graph.initializer if i.name in still_used]
+    if len(kept_inits) != len(graph.initializer):
+        del graph.initializer[:]
+        graph.initializer.extend(kept_inits)
+
+    kept_value_info = [v for v in graph.value_info if v.name not in rewire]
+    if len(kept_value_info) != len(graph.value_info):
+        del graph.value_info[:]
+        graph.value_info.extend(kept_value_info)
+    return model_proto
+
+
 def _deserialize_ir(proto: onnx.ModelProto):
     import onnxscript
 
@@ -304,10 +388,13 @@ def optimize_onnx_program(onnx_program):
 
     Equivalent to ``onnx_program.optimize()`` (onnxscript.optimizer.optimize_ir)
     but with DeduplicateInitializersPass omitted, so equal-valued initializers
-    are never merged.  Returns the same ``onnx_program`` with ``model`` updated
-    in place; callers keep using ``onnx_program.save(path)``.
+    are never merged.  Afterwards ``pair_qdq_edges`` merges duplicate DQ
+    consumers of shared Q nodes so the graph satisfies spec rule 3.4 without
+    relying on onnxslim.  Returns the same ``onnx_program`` with ``model``
+    updated in place; callers keep using ``onnx_program.save(path)``.
     """
     _optimize_ir_without_dedup(onnx_program.model)
+    onnx_program.model = _deserialize_ir(pair_qdq_edges(onnx_program.model_proto))
     return onnx_program
 
 
@@ -356,17 +443,21 @@ def _compare(path_a: str, path_b: str) -> None:
         print(f"  B only: {sorted(set(nb) - set(na))}")
 
     # Numeric equivalence check: canonicalized model vs its own original.
+    # ORT runs with all graph optimizations disabled so results reflect the
+    # graph as written.
     try:
         import numpy as np
         import onnxruntime as ort
 
+        so = ort.SessionOptions()
+        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
         rng = np.random.default_rng(0)
         for orig, canon, tag in ((a_orig, ca, "A"), (b_orig, cb, "B")):
             sess_orig = ort.InferenceSession(
-                orig.SerializeToString(), providers=["CPUExecutionProvider"]
+                orig.SerializeToString(), so, providers=["CPUExecutionProvider"]
             )
             sess_canon = ort.InferenceSession(
-                canon.SerializeToString(), providers=["CPUExecutionProvider"]
+                canon.SerializeToString(), so, providers=["CPUExecutionProvider"]
             )
             inputs = {
                 i.name: rng.random(

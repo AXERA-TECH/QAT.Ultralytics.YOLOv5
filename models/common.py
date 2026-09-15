@@ -5,6 +5,7 @@ import ast
 import contextlib
 import json
 import math
+import os
 import platform
 import warnings
 import zipfile
@@ -559,7 +560,10 @@ class DetectMultiBackend(nn.Module):
             import onnxruntime
 
             providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if cuda else ["CPUExecutionProvider"]
-            session = onnxruntime.InferenceSession(w, providers=providers)
+            session_options = onnxruntime.SessionOptions()
+            if os.environ.get("YOLO_ORT_DISABLE_OPT", "").lower() in ("1", "true", "yes"):
+                session_options.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_DISABLE_ALL
+            session = onnxruntime.InferenceSession(w, session_options, providers=providers)
             output_names = [x.name for x in session.get_outputs()]
             meta = session.get_modelmeta().custom_metadata_map  # metadata
             if "stride" in meta:
