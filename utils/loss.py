@@ -28,8 +28,9 @@ class BCEBlurWithLogitsLoss(nn.Module):
         """Computes modified BCE loss for YOLOv5 with reduced missing label effects, taking pred and true tensors,
         returns mean loss.
         """
+        
         loss = self.loss_fcn(pred, true)
-        pred = torch.sigmoid(pred)  # prob from logits
+        # pred = torch.sigmoid(pred)  # prob from logits
         dx = pred - true  # reduce only missing label effects
         # dx = (pred - true).abs()  # reduce missing label and false label effects
         alpha_factor = 1 - torch.exp((dx - 1) / (self.alpha + 1e-4))
@@ -58,7 +59,8 @@ class FocalLoss(nn.Module):
         # loss *= self.alpha * (1.000001 - p_t) ** self.gamma  # non-zero power for gradient stability
 
         # TF implementation https://github.com/tensorflow/addons/blob/v0.7.1/tensorflow_addons/losses/focal_loss.py
-        pred_prob = torch.sigmoid(pred)  # prob from logits
+        # pred_prob = torch.sigmoid(pred)  # prob from logits
+        pred_prob = pred
         p_t = true * pred_prob + (1 - true) * (1 - pred_prob)
         alpha_factor = true * self.alpha + (1 - true) * (1 - self.alpha)
         modulating_factor = (1.0 - p_t) ** self.gamma
@@ -70,7 +72,30 @@ class FocalLoss(nn.Module):
             return loss.sum()
         else:  # 'none'
             return loss
+        
+class BCELossWithPosWeight(nn.Module):
+    def __init__(self, pos_weight=1.0, reduction="mean", device="cpu"):
+        super().__init__()
+        self.pos_weight = pos_weight
+        self.reduction = reduction
 
+    def forward(self, pred, true):
+        eps = 1e-7
+        pred = torch.clamp(pred, eps, 1.0 - eps)
+
+        log_weight = (self.pos_weight - 1) * true + 1
+        term_pos = true * torch.log(pred) * log_weight
+        term_neg = (1 - true) * torch.log(1 - pred)
+        
+        loss = -(term_pos + term_neg)
+
+        # 3. Reduction
+        if self.reduction == "mean":
+            return loss.mean()
+        elif self.reduction == "sum":
+            return loss.sum()
+        else:
+            return loss
 
 class QFocalLoss(nn.Module):
     """Implements Quality Focal Loss to address class imbalance by modulating loss based on prediction confidence."""
@@ -90,7 +115,8 @@ class QFocalLoss(nn.Module):
         """
         loss = self.loss_fcn(pred, true)
 
-        pred_prob = torch.sigmoid(pred)  # prob from logits
+        # pred_prob = torch.sigmoid(pred)  # prob from logits
+        pred_prob = pred
         alpha_factor = true * self.alpha + (1 - true) * (1 - self.alpha)
         modulating_factor = torch.abs(true - pred_prob) ** self.gamma
         loss *= alpha_factor * modulating_factor
@@ -115,8 +141,8 @@ class ComputeLoss:
         h = model.hyp  # hyperparameters
 
         # Define criteria
-        BCEcls = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h["cls_pw"]], device=device))
-        BCEobj = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h["obj_pw"]], device=device))
+        BCEcls = BCELossWithPosWeight(pos_weight=h["cls_pw"], device=device)
+        BCEobj = BCELossWithPosWeight(pos_weight=h["obj_pw"], device=device)
 
         # Class label smoothing https://arxiv.org/pdf/1902.04103.pdf eqn 3
         self.cp, self.cn = smooth_BCE(eps=h.get("label_smoothing", 0.0))  # positive, negative BCE targets
@@ -147,14 +173,14 @@ class ComputeLoss:
         for i, pi in enumerate(p):  # layer index, layer predictions
             b, a, gj, gi = indices[i]  # image, anchor, gridy, gridx
             tobj = torch.zeros(pi.shape[:4], dtype=pi.dtype, device=self.device)  # target obj
-
+            pi = torch.clamp(pi, min=1e-8, max=1-1e-8)
             if n := b.shape[0]:
                 # pxy, pwh, _, pcls = pi[b, a, gj, gi].tensor_split((2, 4, 5), dim=1)  # faster, requires torch 1.8.0
                 pxy, pwh, _, pcls = pi[b, a, gj, gi].split((2, 2, 1, self.nc), 1)  # target-subset of predictions
 
                 # Regression
-                pxy = pxy.sigmoid() * 2 - 0.5
-                pwh = (pwh.sigmoid() * 2) ** 2 * anchors[i]
+                pxy = pxy * 2 - 0.5
+                pwh = (pwh * 2) ** 2 * anchors[i]
                 pbox = torch.cat((pxy, pwh), 1)  # predicted box
                 iou = bbox_iou(pbox, tbox[i], CIoU=True).squeeze()  # iou(prediction, target)
                 lbox += (1.0 - iou).mean()  # iou loss

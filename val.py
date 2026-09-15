@@ -345,6 +345,9 @@ def run(
         # Inference
         with dt[1]:
             preds, train_out = model(im) if compute_loss else (model(im, augment=augment), None)
+            # for i, x in enumerate(pred):
+            #         bs, _, ny, nx = x.shape  # x(bs,255,20,20) to x(bs,3,20,20,85)
+            #         pred[i] = x.view(bs, 3, nc+5, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
 
         # Loss
         if compute_loss:
