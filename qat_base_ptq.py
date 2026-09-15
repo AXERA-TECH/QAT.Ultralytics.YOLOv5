@@ -122,6 +122,7 @@ GIT_INFO = check_git_info()
 
 import onnx
 from onnxslim import slim
+from onnx_canonicalize import export_onnx_program, optimize_onnx_program, slim_onnx_program
 from torch.ao.quantization.quantizer.xnnpack_quantizer import XNNPACKQuantizer, get_symmetric_quantization_config
 from torch.ao.quantization.quantize_pt2e import prepare_qat_pt2e, convert_pt2e
 from utils.ax_quantizer_lsq import AXQuantizer, load_config
@@ -264,10 +265,12 @@ def train(hyp, opt, device, callbacks):
     # Model = QatDetectionModel # for qat
     check_suffix(weights, ".pt")  # check weights
     pretrained = weights.endswith(".pt")
+    model_yaml = cfg
     if pretrained:
         with torch_distributed_zero_first(LOCAL_RANK):
             weights = attempt_download(weights)  # download if not found locally
         ckpt = torch.load(weights, map_location="cpu", weights_only=False)  # load checkpoint to CPU to avoid CUDA memory leak
+        model_yaml = ckpt["model"].yaml
         model = Model(cfg or ckpt["model"].yaml, ch=3, nc=nc, anchors=hyp.get("anchors")).to(device)  # create
         exclude = ["anchor"] if (cfg or hyp.get("anchors")) and not resume else []  # exclude keys
         csd = ckpt["model"].float().state_dict()  # checkpoint state_dict as FP32
@@ -467,7 +470,7 @@ def train(hyp, opt, device, callbacks):
         f"Starting training for {epochs} epochs..."
     )
     
-    qat_model = QatDetectionModel(cfg or ckpt["model"].yaml, ch=3, nc=nc, anchors=hyp.get("anchors"),model=model,device=device)
+    qat_model = QatDetectionModel(cfg or model_yaml, ch=3, nc=nc, anchors=hyp.get("anchors"),model=model,device=device)
     # model.apply(disable_fake_quant)
     # model.apply(disable_observer)
     
@@ -676,7 +679,14 @@ def train(hyp, opt, device, callbacks):
                 callbacks.run("on_train_batch_end", model, ni, imgs, targets, paths, list(mloss))
                 if callbacks.stop_training:
                     return
+                if opt.max_steps > 0 and ni + 1 >= opt.max_steps:
+                    LOGGER.info(f"max_steps={opt.max_steps} reached at batch ni={ni}, stop training early")
+                    break
             # end batch ------------------------------------------------------------------------------------------------
+
+        if opt.max_steps > 0 and ni + 1 >= opt.max_steps:
+            LOGGER.info(f"max_steps={opt.max_steps} reached, skip remaining epochs and go to final export")
+            break
 
         # Scheduler
         lr = [x["lr"] for x in optimizer.param_groups]  # for loggers
@@ -741,11 +751,22 @@ def train(hyp, opt, device, callbacks):
                 if best_fitness == fi:
                     torch.save(ckpt, best)
                     torch.save(model.state_dict(), best_qat_pt)
+                    model.apply(disable_observer)
+                    prepared_model_copy = deepcopy(de_parallel(model))
+                    prepared_model_copy.eval()
+                    quantized_model = convert_pt2e(prepared_model_copy)
+                    onnx_program = export_onnx_program(quantized_model, (inputs,), dynamo=True)
+                    optimize_onnx_program(onnx_program)
                     onnx_program.save(best_onnx)
                     
                 if opt.save_period > 0 and epoch % opt.save_period == 0:
                     torch.save(ckpt, w / f"epoch{epoch}.pt")
                     torch.save(model.state_dict(), w / f"epoch{epoch}_qat.pt")
+                    prepared_model_copy = deepcopy(de_parallel(model))
+                    prepared_model_copy.eval()
+                    quantized_model = convert_pt2e(prepared_model_copy)
+                    onnx_program = export_onnx_program(quantized_model, (inputs,), dynamo=True)
+                    optimize_onnx_program(onnx_program)
                     onnx_program.save(w / f"epoch{epoch}.onnx")
 
                 del ckpt
@@ -793,15 +814,15 @@ def train(hyp, opt, device, callbacks):
 
     #     callbacks.run("on_train_end", last, best, epoch, results)
 
+    model.apply(disable_observer)
     prepared_model_copy = deepcopy(de_parallel(model))
+    prepared_model_copy.eval()
     quantized_model = convert_pt2e(prepared_model_copy)
-    onnx_program = torch.onnx.export(quantized_model, (inputs,), dynamo=True, opset_version=21)
-    onnx_program.optimize()
+    onnx_program = export_onnx_program(quantized_model, (inputs,), dynamo=True, opset_version=21)
+    optimize_onnx_program(onnx_program)
     onnx_program.save("./yolov5s_qat.onnx")
-
-    model = onnx.load("./yolov5s_qat.onnx")
-    model = slim(model)
-    onnx.save(model, "./yolov5s_qat_slim.onnx")
+    slim_onnx_program(onnx_program)
+    onnx_program.save("./yolov5s_qat_slim.onnx")
 
     torch.cuda.empty_cache()
     return results
@@ -868,6 +889,7 @@ def parse_opt(known=False):
     parser.add_argument("--freeze", nargs="+", type=int, default=[0], help="Freeze layers: backbone=10, first3=0 1 2")
     parser.add_argument("--save-period", type=int, default=-1, help="Save checkpoint every x epochs (disabled if < 1)")
     parser.add_argument("--seed", type=int, default=0, help="Global training seed")
+    parser.add_argument("--max-steps", type=int, default=-1, help="stop training after N batches, for debug (disabled if < 1)")
     parser.add_argument("--local_rank", type=int, default=-1, help="Automatic DDP Multi-GPU argument, do not modify")
     
     # Logger arguments
