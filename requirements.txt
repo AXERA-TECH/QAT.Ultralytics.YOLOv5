@@ -37,8 +37,8 @@ seaborn>=0.11.0
 # tensorflow>=2.4.0,<=2.13.1  # TF exports (-cpu, -aarch64, -macos)
 # tensorflowjs>=3.9.0  # TF.js export
 # openvino-dev>=2023.0  # OpenVINO export
-onnxruntime==1.21.0
-onnxruntime-gpu==1.21.0
+# onnxruntime==1.21.0
+# onnxruntime-gpu==1.21.0
 onnxscript==0.4.0
 # Deploy ----------------------------------------------------------------------
 setuptools>=70.0.0 # Snyk vulnerability fix

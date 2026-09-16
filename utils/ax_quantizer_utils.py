@@ -1403,6 +1403,45 @@ def _annotate_scaled_dot_product_attention(
             _update_last_node_output_qspec(input_node_v, act_node, get_input_act_qspec(quantization_config))
     return
 
+@register_annotator("sigmoid")
+def _annotate_sigmoid(
+    gm: torch.fx.GraphModule,
+    quantization_config: Optional[QuantizationConfig],
+    module_names: List[str] = None,
+    is_global: bool = True,
+) -> Optional[List[List[Node]]]:
+
+    aten_ops = [
+        torch.ops.aten.sigmoid.default,
+        torch.ops.aten.sigmoid_.default,
+    ]
+    _do_annotate_activate(
+        gm,
+        quantization_config,
+        module_names,
+        is_global,
+        aten_ops
+    )
+
+@register_annotator("leaky_relu")
+def _annotate_leaky_relu(
+    gm: torch.fx.GraphModule,
+    quantization_config: Optional[QuantizationConfig],
+    module_names: List[str] = None,
+    is_global: bool = True,
+) -> Optional[List[List[Node]]]:
+
+    aten_ops = [
+        torch.ops.aten.leaky_relu.default,
+        torch.ops.aten.leaky_relu_.default,
+    ]
+    _do_annotate_activate(
+        gm,
+        quantization_config,
+        module_names,
+        is_global,
+        aten_ops
+    )
 
 @register_annotator("mha")
 def _annotate_mha(

@@ -120,8 +120,7 @@ RANK = int(os.getenv("RANK", -1))
 WORLD_SIZE = int(os.getenv("WORLD_SIZE", 1))
 GIT_INFO = check_git_info()
 
-import onnx
-from onnxslim import slim
+from onnx_canonicalize import export_onnx_program, optimize_onnx_program, slim_onnx_program
 from torch.ao.quantization.quantizer.xnnpack_quantizer import XNNPACKQuantizer, get_symmetric_quantization_config
 from torch.ao.quantization.quantize_pt2e import prepare_qat_pt2e, convert_pt2e
 from utils.ax_quantizer_lsq import AXQuantizer, load_config
@@ -293,6 +292,7 @@ def train(hyp, opt, device, callbacks):
     compute_loss = ComputeLoss(model)  # init loss class
 
     inputs = torch.rand(1, 3, 640, 640).to(device)
+    export_inputs = torch.rand(1, 3, 640, 640).to(device)
     dynamic_shapes = {
         "x":{0: torch.export.Dim.AUTO, 2: torch.export.Dim.AUTO, 3: torch.export.Dim.AUTO} 
     }
@@ -556,6 +556,9 @@ def train(hyp, opt, device, callbacks):
             # Forward
             with torch.cuda.amp.autocast(amp):
                 pred = model(imgs)  # forward
+                for i, x in enumerate(pred):
+                    bs, _, ny, nx = x.shape  # x(bs,255,20,20) to x(bs,3,20,20,85)
+                    pred[i] = x.view(bs, qat_model.detm.na, qat_model.detm.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
                 loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
                 if RANK != -1:
                     loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
@@ -600,7 +603,8 @@ def train(hyp, opt, device, callbacks):
             # model.apply(enable_observer)
             # ema.update_attr(model, include=["yaml", "nc", "hyp", "names", "stride", "class_weights"])
             final_epoch = (epoch + 1 == epochs) or stopper.possible_stop
-            if not noval or final_epoch:  # Calculate mAP
+            run_val = (not noval and (epoch + 1) % opt.val_period == 0) or final_epoch
+            if run_val:  # Calculate mAP
                 val_model = de_parallel(model) if RANK != -1 else model
                 qat_model.model = val_model
                 results, maps, _ = validate.run(
@@ -651,8 +655,8 @@ def train(hyp, opt, device, callbacks):
                     prepared_model_copy = deepcopy(de_parallel(model))
                     prepared_model_copy.eval()
                     quantized_model = convert_pt2e(prepared_model_copy)
-                    onnx_program = torch.onnx.export(quantized_model, (inputs,), dynamo=True)
-                    onnx_program.optimize()
+                    onnx_program = export_onnx_program(quantized_model, (export_inputs,), dynamo=True)
+                    optimize_onnx_program(onnx_program)
                     onnx_program.save(best_onnx)
                     del prepared_model_copy
                     del onnx_program
@@ -662,8 +666,8 @@ def train(hyp, opt, device, callbacks):
                     prepared_model_copy = deepcopy(de_parallel(model))
                     prepared_model_copy.eval()
                     quantized_model = convert_pt2e(prepared_model_copy)
-                    onnx_program = torch.onnx.export(quantized_model, (inputs,), dynamo=True)
-                    onnx_program.optimize()
+                    onnx_program = export_onnx_program(quantized_model, (export_inputs,), dynamo=True)
+                    optimize_onnx_program(onnx_program)
                     onnx_program.save(w / f"epoch{epoch}.onnx")
                     del prepared_model_copy
                     del onnx_program
@@ -686,13 +690,11 @@ def train(hyp, opt, device, callbacks):
 
     prepared_model_copy = deepcopy(de_parallel(model))
     quantized_model = convert_pt2e(prepared_model_copy)
-    onnx_program = torch.onnx.export(quantized_model, (inputs,), dynamo=True, opset_version=21)
-    onnx_program.optimize()
+    onnx_program = export_onnx_program(quantized_model, (export_inputs,), dynamo=True, opset_version=21)
+    optimize_onnx_program(onnx_program)
     onnx_program.save("./yolov5s_qat.onnx")
-
-    model = onnx.load("./yolov5s_qat.onnx")
-    model = slim(model)
-    onnx.save(model, "./yolov5s_qat_slim.onnx")
+    slim_onnx_program(onnx_program)
+    onnx_program.save("./yolov5s_qat_slim.onnx")
 
     torch.cuda.empty_cache()
     return results
@@ -732,6 +734,7 @@ def parse_opt(known=False):
     parser.add_argument("--resume", nargs="?", const=True, default=False, help="resume most recent training")
     parser.add_argument("--nosave", action="store_true", help="only save final checkpoint")
     parser.add_argument("--noval", action="store_true", help="only validate final epoch")
+    parser.add_argument("--val-period", type=int, default=1, help="validate every N epochs (final epoch always validated)")
     parser.add_argument("--noautoanchor", action="store_true", help="disable AutoAnchor")
     parser.add_argument("--noplots", action="store_true", help="save no plot files")
     parser.add_argument("--evolve", type=int, nargs="?", const=300, help="evolve hyperparameters for x generations")
