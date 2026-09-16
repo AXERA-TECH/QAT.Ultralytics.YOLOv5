@@ -1423,6 +1423,26 @@ def _annotate_sigmoid(
         aten_ops
     )
 
+@register_annotator("leaky_relu")
+def _annotate_leaky_relu(
+    gm: torch.fx.GraphModule,
+    quantization_config: Optional[QuantizationConfig],
+    module_names: List[str] = None,
+    is_global: bool = True,
+) -> Optional[List[List[Node]]]:
+
+    aten_ops = [
+        torch.ops.aten.leaky_relu.default,
+        torch.ops.aten.leaky_relu_.default,
+    ]
+    _do_annotate_activate(
+        gm,
+        quantization_config,
+        module_names,
+        is_global,
+        aten_ops
+    )
+
 @register_annotator("mha")
 def _annotate_mha(
     gm: torch.fx.GraphModule,

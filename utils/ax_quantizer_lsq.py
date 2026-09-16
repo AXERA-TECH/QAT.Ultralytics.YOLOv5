@@ -373,7 +373,8 @@ class AXQuantizer(Quantizer):
         "silu",
         "softmax",
         "split",
-        "sigmoid"
+        "sigmoid",
+        "leaky_relu"
     ]
 
     def __init__(self, annotate_bias: bool = True) -> None:
